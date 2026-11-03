@@ -1,0 +1,18 @@
+# Build caches (kept out of the workspace and VCS)
+.gradle/
+.gradle-home/
+.android-home/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Demo signing material — replace it with your own release key for distribution.
+keystore/
+
+.kotlin/
+
+# Local tooling and temporary GitHub auth
+.tools/
+.gh-config/
