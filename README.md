@@ -4,6 +4,8 @@
 
 它直接使用 Apple 的 **Companion Link** 协议与局域网内的 Apple TV 通信，不需要中转服务器、云端账号或 Python 环境。配对凭证由 Android Keystore 加密后保存在本机。
 
+GitHub 仓库：<https://github.com/H2FE1/TVRemote> · [Releases](https://github.com/H2FE1/TVRemote/releases/latest)
+
 > 本项目与 Apple Inc. 无关联。“Apple”“Apple TV”“AirPlay”“Siri”是 Apple Inc. 的商标，此处仅用于说明兼容性。
 
 ## 界面
@@ -40,7 +42,7 @@
 
 ## 安装
 
-1. 下载 [`dist/TVRemote-1.0.0.apk`](dist/TVRemote-1.0.0.apk) 并安装（需要允许“安装未知来源应用”）。
+1. 从 [Releases](https://github.com/H2FE1/TVRemote/releases/latest) 下载 `TVRemote-1.0.0.apk`，或使用仓库内的 [`dist/TVRemote-1.0.0.apk`](dist/TVRemote-1.0.0.apk)（需要允许“安装未知来源应用”）。
 2. 手机和 Apple TV 连接到**同一个 Wi-Fi / 子网**。
 3. 打开 App，轻点发现的 Apple TV。
 4. 输入电视屏幕上显示的 4 位配对码。
