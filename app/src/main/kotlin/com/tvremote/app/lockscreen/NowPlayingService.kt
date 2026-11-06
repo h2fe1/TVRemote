@@ -9,6 +9,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -170,7 +172,7 @@ class NowPlayingService : Service() {
     private fun buildIdleNotification(): Notification {
         val contentIntent = contentIntent()
         return Notification.Builder(this, CHANNEL_IDLE)
-            .setSmallIcon(R.drawable.ic_stat_tv)
+            .setSmallIcon(R.drawable.ic_stat_blank)
             .setContentTitle("TV Remote")
             .setContentText("已连接 ${LockScreenMedia.deviceName.value ?: "Apple TV"}")
             .setContentIntent(contentIntent)
@@ -187,7 +189,7 @@ class NowPlayingService : Service() {
         session.setSessionActivity(contentIntent)
 
         val builder = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_tv)
+            .setSmallIcon(R.drawable.ic_stat_blank)
             .setContentTitle(state.title)
             .setContentText(state.artist ?: "Apple TV")
             .setSubText("TV Remote")
@@ -218,7 +220,13 @@ class NowPlayingService : Service() {
                     ACTION_MUTE,
                 ),
             )
-        if (art != null) builder.setLargeIcon(art)
+        // Always provide a large icon: without artwork the system would use
+        // the small notification icon for both the card header and its badge,
+        // producing the doubled TV glyph. A blank small icon plus an explicit
+        // large TV/artwork keeps the card header to a single glyph.
+        val large = art ?: ContextCompat.getDrawable(this, R.drawable.ic_stat_tv)
+            ?.toBitmap(width = 192, height = 192)
+        if (large != null) builder.setLargeIcon(large)
         return builder.build()
     }
 

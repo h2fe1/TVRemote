@@ -1,2 +1,2 @@
 84e1feaab080b5378d31119624e7b8322577a665e3af1d68c8e8497c15c5c69d  dist/TVRemote-1.0.0.apk
-270fd484bfba668516b3debc9bece226ab08cdb1764fdd7eb198d26aece138c6  dist/TVRemote-1.1.0.apk
+8d922e4bc616a86aab612c5a18729d40a051a77ef74f1e4feb833542c21a4b62  dist/TVRemote-1.1.0.apk
