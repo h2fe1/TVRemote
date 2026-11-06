@@ -52,6 +52,31 @@ class CompanionClient(
 
     private val _keyboardFocus = MutableStateFlow(KeyboardFocusState.Unknown)
 
+    private val _playbackState = MutableStateFlow(PlaybackState.Unknown)
+
+    /** Playback transport state pushed by the TV (Unknown until the first `_iMC`). */
+    val playbackState: StateFlow<PlaybackState> = _playbackState
+
+    private var clearNowPlayingJob: Job? = null
+
+    @Volatile
+    private var ignoreNowPlayingUntilMs = 0L
+
+    private val _nowPlaying = MutableStateFlow<NowPlaying?>(null)
+
+    /** Latest now-playing snapshot, or null when the TV reports nothing/stopped. */
+    val nowPlaying: StateFlow<NowPlaying?> = _nowPlaying
+
+    private val _volumeControlAvailable = MutableStateFlow(false)
+
+    /** Whether the TV currently advertises absolute volume control (CEC). */
+    val volumeControlAvailable: StateFlow<Boolean> = _volumeControlAvailable
+
+    private val _systemStatus = MutableStateFlow(SystemStatus.Unknown)
+
+    /** TV power state pushed via `(TV)SystemStatus` events. */
+    val systemStatus: StateFlow<SystemStatus> = _systemStatus
+
     // Most recent `_tiD` keyed archive from a `_tiStarted` event (or a
     // `_tiStart` response that happened to carry one). On this hardware the
     // sessionUUID lives here, NOT in the response to a `_tiStop`+`_tiStart`
@@ -74,8 +99,12 @@ class CompanionClient(
 
         scope.launch {
             events.collect { event ->
-                if (event.name == "_tiStarted" || event.name == "_tiStopped") {
-                    onFocusEvent(event.content)
+                when (event.name) {
+                    "_tiStarted", "_tiStopped" -> onFocusEvent(event.content)
+                    "_iMC" -> updatePlaybackState(event.content["_mcF"])
+                    "MediaControlStatus" -> updatePlaybackState(event.content["MediaControlFlags"])
+                    "NowPlayingInfo" -> updateNowPlaying(event.content)
+                    "SystemStatus", "TVSystemStatus" -> updateSystemStatus(event.content["state"])
                 }
             }
         }
@@ -86,6 +115,9 @@ class CompanionClient(
         tvRcSessionStart()
         textInputStart()
         subscribeEvent("_iMC")
+        subscribeEvent("NowPlayingInfo")
+        subscribeEvent("SystemStatus")
+        subscribeEvent("TVSystemStatus")
     }
 
     /** Graceful teardown mirroring pyatv `CompanionAPI.disconnect`. */
@@ -180,6 +212,50 @@ class CompanionClient(
         } else {
             latestTiData = null
             _keyboardFocus.value = KeyboardFocusState.Unfocused
+        }
+    }
+
+    private fun updatePlaybackState(flags: Any?) {
+        val value = (flags as? Number)?.toLong() ?: return
+        _volumeControlAvailable.value = value and 0x0100L != 0L
+        val state = playbackStateFromMediaFlags(value)
+        _playbackState.value = state
+        // tvOS briefly reports "no controls allowed" while waking. Delay the
+        // teardown so a transient 0 does not flash the now-playing bar away.
+        clearNowPlayingJob?.cancel()
+        if (state == PlaybackState.Stopped) {
+            clearNowPlayingJob = scope.launch {
+                delay(3_000)
+                if (_playbackState.value == PlaybackState.Stopped) _nowPlaying.value = null
+            }
+        }
+    }
+
+    private fun updateSystemStatus(value: Any?) {
+        val code = (value as? Number)?.toLong() ?: return
+        _systemStatus.value = SystemStatus.fromCode(code)
+    }
+
+    /** Ignore volume-command induced NowPlayingInfo churn for a short window. */
+    fun suppressNowPlayingFor(durationMs: Long) {
+        ignoreNowPlayingUntilMs = System.nanoTime() / 1_000_000 + durationMs
+    }
+
+    private fun updateNowPlaying(content: Map<Any?, Any?>) {
+        if (System.nanoTime() / 1_000_000 < ignoreNowPlayingUntilMs) return
+        val archive = content["NowPlayingInfoKey"] as? ByteArray ?: return
+        val update = NowPlayingParser.parse(archive) ?: return
+        val merged = _nowPlaying.value?.merge(update) ?: update
+        if (merged.title != null) _nowPlaying.value = merged
+        // Fallback for TVs that do not push reliable `_iMC` flags. Only trust
+        // a rate on a full snapshot (title present); volume-only partial
+        // updates can carry a placeholder rate of 0.
+        update.playbackRate?.let { rate ->
+            when {
+                rate > 0.0 -> _playbackState.value = PlaybackState.Playing
+                rate == 0.0 && _playbackState.value != PlaybackState.Stopped ->
+                    _playbackState.value = PlaybackState.Paused
+            }
         }
     }
 
@@ -404,6 +480,32 @@ class CompanionClient(
         val response = sendRequest("_mcc", linkedMapOf<String, Any?>("_mcc" to command.code) + args)
         return contentOf(response)
     }
+
+    /** Current absolute volume, 0.0..1.0, or null when the TV does not report it. */
+    suspend fun getVolume(): Double? =
+        (mediaControl(MediaControlCommand.GetVolume)["_vol"] as? Number)?.toDouble()
+
+    /** Set absolute volume, 0.0..1.0 (pyatv `Audio.set_volume`). */
+    suspend fun setVolume(level: Double) {
+        mediaControl(
+            MediaControlCommand.SetVolume,
+            mapOf("_vol" to level.coerceIn(0.0, 1.0)),
+        )
+    }
+
+    suspend fun nextTrack() = mediaControl(MediaControlCommand.NextTrack)
+
+    suspend fun previousTrack() = mediaControl(MediaControlCommand.PreviousTrack)
+
+    /** Seek relative to the current position in seconds (negative = rewind). */
+    suspend fun skipBy(seconds: Double) {
+        mediaControl(MediaControlCommand.SkipBy, mapOf("_skpS" to seconds))
+    }
+
+    /** Explicit transport commands; more reliable than HID PlayPause on tvOS. */
+    suspend fun play() = mediaControl(MediaControlCommand.Play)
+
+    suspend fun pause() = mediaControl(MediaControlCommand.Pause)
 
     // Plumbing
 

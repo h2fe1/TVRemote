@@ -5,6 +5,9 @@ import dev.companionremote.protocol.hap.FakeAtv
 import dev.companionremote.protocol.hap.FakeAtvTransport
 import dev.companionremote.protocol.hap.HapCredentials
 import dev.companionremote.protocol.hap.PairSetup
+import dev.companionremote.protocol.plist.BinaryPlist
+import dev.companionremote.protocol.plist.PlistUid
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -81,6 +84,18 @@ class CompanionClientTest {
     }
 
     @Test
+    fun `mute simulates the siri remote hid button`() = runWithClient({ null }) { client, atv ->
+        atv.requestLog.clear()
+        client.pressButton(HidCommand.Mute)
+        @Suppress("UNCHECKED_CAST")
+        val states = atv.requestLog
+            .filter { it["_i"] == "_hidC" }
+            .map { it["_c"] as Map<Any?, Any?> }
+        assertEquals(listOf(1L, 2L), states.map { it["_hBtS"] })
+        assertEquals(listOf(18L, 18L), states.map { it["_hidC"] })
+    }
+
+    @Test
     fun `wake is a single up event`() = runWithClient({ null }) { client, atv ->
         atv.requestLog.clear()
         client.wake()
@@ -113,6 +128,127 @@ class CompanionClientTest {
         @Suppress("UNCHECKED_CAST")
         val launch = atv.requestLog.last { it["_i"] == "_launchApp" }["_c"] as Map<Any?, Any?>
         assertEquals("com.google.ios.youtube", launch["_bundleID"])
+    }
+
+    @Test
+    fun `media control flags update playback state`() = runWithClient({ null }) { client, atv ->
+        assertEquals(PlaybackState.Unknown, client.playbackState.value)
+
+        atv.pushEvent("_iMC", mapOf("_mcF" to 2L))
+        assertEquals(
+            PlaybackState.Playing,
+            withTimeout(2_000) { client.playbackState.first { it == PlaybackState.Playing } },
+        )
+
+        atv.pushEvent("_iMC", mapOf("_mcF" to 1L))
+        assertEquals(
+            PlaybackState.Paused,
+            withTimeout(2_000) { client.playbackState.first { it == PlaybackState.Paused } },
+        )
+    }
+
+    @Test
+    fun `volume get and set use media control commands`() = runWithClient({ message ->
+        @Suppress("UNCHECKED_CAST")
+        val content = message["_c"] as? Map<Any?, Any?>
+        if (content?.get("_mcc") == 5L) {
+            mapOf("_c" to mapOf("_vol" to 0.42))
+        } else {
+            null
+        }
+    }) { client, atv ->
+        assertEquals(0.42, client.getVolume())
+
+        atv.requestLog.clear()
+        client.setVolume(0.0)
+        @Suppress("UNCHECKED_CAST")
+        val set = atv.requestLog
+            .last { it["_i"] == "_mcc" }["_c"] as Map<Any?, Any?>
+        assertEquals(6L, set["_mcc"])
+        assertEquals(0.0, set["_vol"])
+
+        atv.requestLog.clear()
+        client.skipBy(-15.0)
+        @Suppress("UNCHECKED_CAST")
+        val skip = atv.requestLog
+            .last { it["_i"] == "_mcc" }["_c"] as Map<Any?, Any?>
+        assertEquals(7L, skip["_mcc"])
+        assertEquals(-15.0, skip["_skpS"])
+    }
+
+    @Test
+    fun `play and pause use media control commands`() = runWithClient({ null }) { client, atv ->
+        atv.requestLog.clear()
+        client.play()
+        client.pause()
+        @Suppress("UNCHECKED_CAST")
+        val commands = atv.requestLog
+            .filter { it["_i"] == "_mcc" }
+            .map { (it["_c"] as Map<Any?, Any?>)["_mcc"] }
+        assertEquals(listOf(1L, 2L), commands)
+    }
+
+    @Test
+    fun `now playing event updates the snapshot`() = runWithClient({ null }) { client, atv ->
+        val archive = BinaryPlist.encode(
+            linkedMapOf(
+                "\$version" to 100000L,
+                "\$archiver" to "NSKeyedArchiver",
+                "\$top" to linkedMapOf("root" to PlistUid(1)),
+                "\$objects" to listOf(
+                    "\$null",
+                    linkedMapOf("metadata" to PlistUid(2)),
+                    linkedMapOf(
+                        "title" to PlistUid(3),
+                        "artist" to PlistUid(4),
+                        "duration" to 3600L,
+                        "elapsedTime" to 1466.0,
+                    ),
+                    "甄嬛传",
+                    "电视剧",
+                ),
+            ),
+        )
+        atv.pushEvent("NowPlayingInfo", mapOf("NowPlayingInfoKey" to archive))
+
+        val snapshot = withTimeout(2_000) {
+            client.nowPlaying.first { it?.title == "甄嬛传" }
+        }
+        assertEquals("电视剧", snapshot?.artist)
+        assertEquals(3600.0, snapshot?.durationSeconds)
+    }
+
+    @Test
+    fun `now playing playback rate updates transport state`() = runWithClient({ null }) { client, atv ->
+        fun archive(rate: Double) = BinaryPlist.encode(
+            linkedMapOf(
+                "\$version" to 100000L,
+                "\$archiver" to "NSKeyedArchiver",
+                "\$top" to linkedMapOf("root" to PlistUid(1)),
+                "\$objects" to listOf(
+                    "\$null",
+                    linkedMapOf("metadata" to PlistUid(2)),
+                    linkedMapOf(
+                        "title" to PlistUid(3),
+                        "duration" to 100L,
+                        "elapsedTime" to 10.0,
+                        "playbackRate" to rate,
+                    ),
+                    "测试视频",
+                ),
+            ),
+        )
+        atv.pushEvent("NowPlayingInfo", mapOf("NowPlayingInfoKey" to archive(0.0)))
+        assertEquals(
+            PlaybackState.Paused,
+            withTimeout(2_000) { client.playbackState.first { it == PlaybackState.Paused } },
+        )
+
+        atv.pushEvent("NowPlayingInfo", mapOf("NowPlayingInfoKey" to archive(1.0)))
+        assertEquals(
+            PlaybackState.Playing,
+            withTimeout(2_000) { client.playbackState.first { it == PlaybackState.Playing } },
+        )
     }
 
     @Test

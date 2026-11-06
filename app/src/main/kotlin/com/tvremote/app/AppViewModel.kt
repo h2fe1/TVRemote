@@ -1,14 +1,27 @@
 package com.tvremote.app
 
 import android.app.Application
+import android.content.Intent
+import android.os.SystemClock
+import android.util.Log
+import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvremote.app.data.CredentialsRepository
+import com.tvremote.app.data.SettingsRepository
 import com.tvremote.app.discovery.AtvDiscovery
 import com.tvremote.app.discovery.DiscoveredAtv
+import com.tvremote.app.lockscreen.LockScreenCommand
+import com.tvremote.app.lockscreen.LockScreenMedia
+import com.tvremote.app.lockscreen.LockScreenState
+import com.tvremote.app.lockscreen.NowPlayingService
 import dev.companionremote.protocol.client.CompanionClient
 import dev.companionremote.protocol.client.HidCommand
 import dev.companionremote.protocol.client.KeyboardFocusState
+import dev.companionremote.protocol.client.NowPlaying
+import dev.companionremote.protocol.client.PlaybackState
+import dev.companionremote.protocol.client.SystemStatus
 import dev.companionremote.protocol.client.TouchPhase
 import dev.companionremote.protocol.companion.CompanionConnection
 import dev.companionremote.protocol.hap.HapCredentials
@@ -16,6 +29,7 @@ import dev.companionremote.protocol.hap.PairSetup
 import dev.companionremote.protocol.transport.SocketTransport
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -52,6 +66,7 @@ data class DeviceListUi(
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val discovery = AtvDiscovery(application)
     private val credentials = CredentialsRepository(application)
+    private val settings = SettingsRepository(application)
 
     val screen = MutableStateFlow<Screen>(Screen.Devices)
     val devices = MutableStateFlow(DeviceListUi())
@@ -67,6 +82,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val demoMode = MutableStateFlow(false)
     val waking = MutableStateFlow(false)
 
+    /** When true, the phone's volume keys adjust the TV instead of the phone. */
+    val volumeKeysControlTv = MutableStateFlow(true)
+
+    /** Playback state pushed by the TV; drives the play/pause button icon. */
+    val playbackState = MutableStateFlow(PlaybackState.Unknown)
+
+    /** Latest now-playing metadata, or null when nothing is reported. */
+    val nowPlaying = MutableStateFlow<NowPlaying?>(null)
+
+    /**
+     * What the in-app bar should render. Falls back to a generic card when the
+     * TV is playing but the current app reports no metadata (common for some
+     * video/audio apps).
+     */
+    val displayNowPlaying = MutableStateFlow<NowPlaying?>(null)
+
+    /** Set after the mute button silences the TV; cleared when volume is restored. */
+    val muted = MutableStateFlow(false)
+
+    /** TV power state; the lock screen card is hidden while asleep/screensaver. */
+    val tvPower = MutableStateFlow(SystemStatus.Unknown)
+
+    /** The TV advertises absolute volume control (CEC). */
+    val volumeControlAvailable = MutableStateFlow(false)
+
+    /** One-shot UI message (toast); cleared by the UI after showing. */
+    val message = MutableStateFlow<String?>(null)
+
     private var client: CompanionClient? = null
     private var connectionJob: Job? = null
     private var scanJob: Job? = null
@@ -76,14 +119,163 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var keyboardJob: Job? = null
     private var textJob: Job? = null
     private var touchJob: Job? = null
+    private var playbackJob: Job? = null
+    private var nowPlayingJob: Job? = null
+    private var powerJob: Job? = null
+    private var volumeJob: Job? = null
     private var connectionToken = 0
     private var lastHoldAt = 0L
+    private var lastVolumeKeyAt = 0L
+    private var nowPlayingAnchorMs = SystemClock.elapsedRealtime()
+    private var lockScreenServiceStarted = false
     private var demoDevicesMode = false
     private val touchQueue = Channel<TouchSample>(capacity = 256)
 
     init {
+        viewModelScope.launch {
+            settings.volumeKeysControlTv.collect { volumeKeysControlTv.value = it }
+        }
         viewModelScope.launch { refreshPairedKeys() }
         startScan()
+        startLockScreenSync()
+    }
+
+    /**
+     * Publishes the TV's now-playing state to the system only while the TV has
+     * an active media item and is connected. Home screen / sleep / stopped
+     * playback clears the session, so the lock screen card disappears again.
+     */
+    private fun startLockScreenSync() {
+        LockScreenMedia.commandHandler = { command ->
+            when (command) {
+                LockScreenCommand.Play -> {
+                    if (playbackState.value != PlaybackState.Playing) playPause()
+                }
+                LockScreenCommand.Pause -> {
+                    if (playbackState.value == PlaybackState.Playing) playPause()
+                }
+                LockScreenCommand.Rewind15 -> skipBy(-15.0)
+                LockScreenCommand.Forward15 -> skipBy(15.0)
+                LockScreenCommand.ToggleMute -> toggleMute()
+                is LockScreenCommand.SeekTo -> seekTo(command.positionMs)
+            }
+        }
+        viewModelScope.launch {
+            connectionState.collect { connection ->
+                if (connection == ConnectionState.Connected) {
+                    LockScreenMedia.deviceName.value =
+                        activeDevice.value?.name ?: "Apple TV"
+                    startLockScreenService()
+                } else {
+                    LockScreenMedia.state.value = null
+                    stopLockScreenService()
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(
+                nowPlaying,
+                playbackState,
+                connectionState,
+                muted,
+                tvPower,
+            ) { playing, playback, connection, isMuted, power ->
+                val active = connection == ConnectionState.Connected &&
+                    power != SystemStatus.Asleep &&
+                    power != SystemStatus.Screensaver &&
+                    (playback == PlaybackState.Playing ||
+                        playback == PlaybackState.Paused)
+                if (!active) return@combine null
+                val current = playing?.takeIf { !it.title.isNullOrBlank() }
+                val deviceName = activeDevice.value?.name ?: "Apple TV"
+                val display = current ?: NowPlaying(
+                    title = "正在播放",
+                    artist = deviceName,
+                )
+                displayNowPlaying.value = display
+                LockScreenState(
+                    title = display.title ?: deviceName,
+                    artist = display.artist ?: display.album ?: "正在播放",
+                    durationMs = ((display.durationSeconds ?: 0.0) * 1000.0).toLong(),
+                    positionMs = ((display.elapsedSeconds ?: 0.0) * 1000.0).toLong(),
+                    isPlaying = playback == PlaybackState.Playing,
+                    muted = isMuted,
+                    artwork = display.artwork,
+                )
+            }.collect { state ->
+                LockScreenMedia.state.value = state
+                if (state == null) displayNowPlaying.value = null
+            }
+        }
+    }
+
+    private fun startLockScreenService() {
+        if (lockScreenServiceStarted) return
+        lockScreenServiceStarted = true
+        runCatching {
+            ContextCompat.startForegroundService(
+                getApplication(),
+                Intent(getApplication(), NowPlayingService::class.java),
+            )
+        }.onFailure {
+            lockScreenServiceStarted = false
+        }
+    }
+
+    private fun stopLockScreenService() {
+        if (!lockScreenServiceStarted) return
+        lockScreenServiceStarted = false
+        getApplication<Application>()
+            .stopService(Intent(getApplication(), NowPlayingService::class.java))
+    }
+
+    private fun seekTo(positionMs: Long) = seekToSeconds(positionMs / 1000.0)
+
+    /** Current transport position, including local interpolation since the last TV update. */
+    private fun currentPositionSeconds(): Double {
+        val media = nowPlaying.value ?: return 0.0
+        val base = media.elapsedSeconds ?: 0.0
+        val rate = if (playbackState.value == PlaybackState.Playing) {
+            media.playbackRate?.takeIf { it > 0.0 } ?: 1.0
+        } else {
+            0.0
+        }
+        val advance = if (rate > 0.0) {
+            (SystemClock.elapsedRealtime() - nowPlayingAnchorMs).coerceAtLeast(0L) /
+                1000.0 * rate
+        } else {
+            0.0
+        }
+        val position = base + advance
+        val duration = media.durationSeconds
+        return if (duration != null && duration > 0.0) {
+            position.coerceIn(0.0, duration)
+        } else {
+            position
+        }
+    }
+
+    /** Seek from the in-app scrubber; target is in seconds. */
+    fun seekToSeconds(targetSeconds: Double) {
+        val media = nowPlaying.value ?: return
+        val duration = media.durationSeconds
+        val target = if (duration != null && duration > 0.0) {
+            targetSeconds.coerceIn(0.0, duration)
+        } else {
+            targetSeconds.coerceAtLeast(0.0)
+        }
+        val delta = target - currentPositionSeconds()
+        if (demoMode.value) {
+            nowPlaying.value = media.copy(elapsedSeconds = target)
+            nowPlayingAnchorMs = SystemClock.elapsedRealtime()
+            return
+        }
+        if (kotlin.math.abs(delta) < 0.5) return
+        // Keep the optimistic target on screen while tvOS processes the skip.
+        client?.suppressNowPlayingFor(1_200)
+        skipBy(delta)
+        nowPlaying.value = media.copy(elapsedSeconds = target)
+        nowPlayingAnchorMs = SystemClock.elapsedRealtime()
     }
 
     // ---------------------------------------------------------------- Discovery
@@ -238,6 +430,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         appsError.value = null
         keyboardFocus.value = KeyboardFocusState.Unknown
         keyboardText.value = ""
+        playbackState.value = PlaybackState.Unknown
+        nowPlaying.value = null
+        tvPower.value = SystemStatus.Unknown
+        muted.value = false
         connect(device, creds)
     }
 
@@ -269,6 +465,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     connectionState.value = ConnectionState.Connected
                     connectionError.value = null
                     observeKeyboard(newClient)
+                    observePlayback(newClient)
+                    observeNowPlaying(newClient)
+                    observePower(newClient)
+                    observeVolumeControl(newClient)
+                    syncMuteState(newClient)
                     consumeTouches(newClient)
                     return true
                 } catch (e: Exception) {
@@ -295,6 +496,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (token == connectionToken) {
                     connectionState.value = ConnectionState.Disconnected
                     connectionError.value = friendlyError(lastError ?: e)
+                    playbackState.value = PlaybackState.Unknown
+                    nowPlaying.value = null
+                    tvPower.value = SystemStatus.Unknown
+                    volumeControlAvailable.value = false
+                    muted.value = false
                     client = null
                 }
             }
@@ -331,6 +537,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         connectionError.value = null
         keyboardFocus.value = KeyboardFocusState.Unknown
         keyboardText.value = ""
+        playbackState.value = PlaybackState.Unknown
+        nowPlaying.value = null
+        muted.value = false
+        displayNowPlaying.value = null
         apps.value = null
         appsError.value = null
         screen.value = Screen.Devices
@@ -354,6 +564,122 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun pressButton(command: HidCommand) = withClient { it.pressButton(command) }
 
     fun holdButton(command: HidCommand) = withClient { it.holdButton(command, holdMs = 700) }
+
+    /**
+     * Sends the Siri Remote play/pause toggle. The TV decides which way to
+     * toggle (and pushes the resulting state back through `_iMC`), so the
+     * button still does the right thing if playback was changed elsewhere.
+     */
+    fun playPause() {
+        if (demoMode.value) {
+            playbackState.value = if (playbackState.value == PlaybackState.Playing) {
+                PlaybackState.Paused
+            } else {
+                PlaybackState.Playing
+            }
+            return
+        }
+        if (connectionState.value != ConnectionState.Connected) return
+        val active = client ?: return
+        val previous = playbackState.value
+        val target = if (previous == PlaybackState.Playing) {
+            PlaybackState.Paused
+        } else {
+            PlaybackState.Playing
+        }
+        // Optimistic: the button icon must flip immediately even if tvOS never
+        // pushes an `_iMC` event for this particular app.
+        playbackState.value = target
+        viewModelScope.launch {
+            try {
+                if (target == PlaybackState.Playing) active.play() else active.pause()
+            } catch (e: Exception) {
+                // Some titles only accept the HID toggle; fall back to it.
+                val fallback = runCatching { active.pressButton(HidCommand.PlayPause) }
+                if (fallback.isSuccess) {
+                    playbackState.value = target
+                } else {
+                    playbackState.value = previous
+                }
+            }
+        }
+    }
+
+    fun skipBy(seconds: Double) = withClient { it.skipBy(seconds) }
+
+    /**
+     * Simulates the Siri Remote's mute button: the physical remote sends HID
+     * command 18 (down + up), and the Apple TV applies its own mute/CEC/IR
+     * routing. This is different from writing volume 0 over `_mcc`, which can
+     * change the reported volume without muting the actual audio route.
+     */
+    fun toggleMute() {
+        if (demoMode.value) {
+            muted.value = !muted.value
+            return
+        }
+        if (connectionState.value != ConnectionState.Connected) return
+        val active = client ?: return
+        val target = !muted.value
+        muted.value = target
+        // Muting can make tvOS push a fresh (sometimes zero-position) snapshot;
+        // ignore that churn so the progress bar stays where it was.
+        active.suppressNowPlayingFor(1_500)
+        Log.d("TVRemoteMute", "mute target=$target")
+        viewModelScope.launch {
+            runCatching { active.pressButton(HidCommand.Mute) }
+                .onFailure {
+                    muted.value = !target
+                    message.value = "静音键发送失败，请重试。"
+                }
+        }
+    }
+
+    private fun syncMuteState(activeClient: CompanionClient) {
+        viewModelScope.launch {
+            if (!activeClient.volumeControlAvailable.value) return@launch
+            val level = runCatching { activeClient.getVolume() }.getOrNull() ?: return@launch
+            muted.value = level <= 0.01
+        }
+    }
+
+    fun clearMessage() {
+        message.value = null
+    }
+
+
+    fun setVolumeKeysControlTv(enabled: Boolean) {
+        volumeKeysControlTv.value = enabled
+        viewModelScope.launch { runCatching { settings.setVolumeKeysControlTv(enabled) } }
+    }
+
+    /**
+     * Handles a hardware volume key press on behalf of the Activity.
+     *
+     * Returns true when the event should be swallowed. That only happens while
+     * the remote screen owns a live session and the user has left the setting
+     * on; everywhere else the phone keeps its normal volume behaviour. Repeats
+     * are throttled so holding the key ramps the TV volume instead of flooding
+     * the Companion connection.
+     */
+    fun handleHardwareVolumeKey(keyCode: Int, action: Int): Boolean {
+        val up = when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP -> true
+            KeyEvent.KEYCODE_VOLUME_DOWN -> false
+            else -> return false
+        }
+        if (!volumeKeysControlTv.value) return false
+        if (screen.value !is Screen.Remote) return false
+        if (connectionState.value != ConnectionState.Connected) return false
+        if (action == KeyEvent.ACTION_UP) return true
+        if (demoMode.value) return true
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastVolumeKeyAt < VOLUME_KEY_REPEAT_MS) return true
+        lastVolumeKeyAt = now
+        if (up) muted.value = false
+        pressButton(if (up) HidCommand.VolumeUp else HidCommand.VolumeDown)
+        return true
+    }
 
     fun sendTouch(x: Long, y: Long, phase: TouchPhase) {
         if (demoMode.value) return
@@ -397,6 +723,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun sleep() = withClient { it.sleep() }
 
     fun controlCenter() = withClient { it.holdButton(HidCommand.Home, holdMs = 900) }
+
+    // ---------------------------------------------------------------- Playback
+
+    private fun observePlayback(activeClient: CompanionClient) {
+        playbackJob?.cancel()
+        playbackJob = viewModelScope.launch {
+            activeClient.playbackState.collect { playbackState.value = it }
+        }
+    }
+
+    private fun observeVolumeControl(activeClient: CompanionClient) {
+        volumeJob?.cancel()
+        volumeJob = viewModelScope.launch {
+            activeClient.volumeControlAvailable.collect { volumeControlAvailable.value = it }
+        }
+    }
+
+    private fun observePower(activeClient: CompanionClient) {
+        powerJob?.cancel()
+        powerJob = viewModelScope.launch {
+            activeClient.systemStatus.collect { tvPower.value = it }
+        }
+    }
+
+    private fun observeNowPlaying(activeClient: CompanionClient) {
+        nowPlayingJob?.cancel()
+        nowPlayingJob = viewModelScope.launch {
+            activeClient.nowPlaying.collect {
+                nowPlayingAnchorMs = SystemClock.elapsedRealtime()
+                nowPlaying.value = it
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- Keyboard
 
@@ -491,6 +850,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         connectionError.value = null
         apps.value = demoApps
         keyboardFocus.value = KeyboardFocusState.Unknown
+        playbackState.value = PlaybackState.Paused
+        muted.value = false
+        val demoArtwork = runCatching {
+            getApplication<Application>().assets.open("demo_artwork.jpg").use { it.readBytes() }
+        }.getOrNull()
+        nowPlaying.value = NowPlaying(
+            title = "甄嬛传",
+            artist = "第 24 集 · 电视剧",
+            durationSeconds = 2709.0,
+            elapsedSeconds = 1466.0,
+            playbackRate = 1.0,
+            artwork = demoArtwork,
+        )
     }
 
     fun showDemoDevices() {
@@ -527,12 +899,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         connectionJob?.cancel()
         pairingJob?.cancel()
         scanJob?.cancel()
+        playbackJob?.cancel()
+        nowPlayingJob?.cancel()
+        powerJob?.cancel()
+        volumeJob?.cancel()
         closePairingTransport()
         client?.close()
+        LockScreenMedia.commandHandler = null
+        LockScreenMedia.state.value = null
+        stopLockScreenService()
         super.onCleared()
     }
 
     private data class TouchSample(val x: Long, val y: Long, val phase: TouchPhase)
+
+    private companion object {
+        /** Minimum gap between volume steps while a volume key is held down. */
+        const val VOLUME_KEY_REPEAT_MS = 120L
+    }
 }
 
 data class AppEntry(val bundleId: String, val name: String)

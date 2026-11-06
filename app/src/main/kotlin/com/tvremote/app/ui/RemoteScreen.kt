@@ -1,5 +1,8 @@
 package com.tvremote.app.ui
 
+import android.graphics.BitmapFactory
+import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -8,11 +11,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +33,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -38,8 +44,10 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Apps
@@ -48,16 +56,21 @@ import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.Replay
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.Remove
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -75,13 +88,21 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,9 +113,12 @@ import com.tvremote.app.discovery.DiscoveredAtv
 import com.tvremote.app.theme.Palette
 import dev.companionremote.protocol.client.HidCommand
 import dev.companionremote.protocol.client.KeyboardFocusState
+import dev.companionremote.protocol.client.NowPlaying
+import dev.companionremote.protocol.client.PlaybackState
 import dev.companionremote.protocol.client.TouchPhase
 import kotlin.math.abs
 import kotlin.math.min
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
@@ -104,12 +128,26 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
     val focusState by viewModel.keyboardFocus.collectAsState()
     val keyboardText by viewModel.keyboardText.collectAsState()
     val waking by viewModel.waking.collectAsState()
+    val volumeKeysControlTv by viewModel.volumeKeysControlTv.collectAsState()
+    val playback by viewModel.playbackState.collectAsState()
+    val playing = playback == PlaybackState.Playing
+    val nowPlaying by viewModel.displayNowPlaying.collectAsState()
+    val muted by viewModel.muted.collectAsState()
+    val uiMessage by viewModel.message.collectAsState()
 
     var appsOpen by remember { mutableStateOf(false) }
     var keyboardOpen by remember { mutableStateOf(false) }
     var powerOpen by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+
+    LaunchedEffect(uiMessage) {
+        uiMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_LONG).show()
+            viewModel.clearMessage()
+        }
+    }
 
     fun buzz() {
         runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
@@ -122,11 +160,26 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
         buzz()
         viewModel.holdButton(command)
     }
+    fun playPause() {
+        buzz()
+        viewModel.playPause()
+    }
+    fun toggleMute() {
+        buzz()
+        viewModel.toggleMute()
+    }
+    fun rewind15() {
+        buzz()
+        viewModel.skipBy(-15.0)
+    }
+    fun forward15() {
+        buzz()
+        viewModel.skipBy(15.0)
+    }
     fun closeKeyboard() {
         keyboardOpen = false
         keyboard?.hide()
     }
-
     BackHandler {
         when {
             powerOpen -> powerOpen = false
@@ -173,10 +226,16 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
                         press = ::press,
                         hold = ::hold,
                         onSelect = { viewModel.touchTap() },
-                        onDirection = ::press,
                         onLongPress = { hold(HidCommand.Select) },
                         onTouch = viewModel::sendTouch,
-                        onVolume = { up -> press(if (up) HidCommand.VolumeUp else HidCommand.VolumeDown) },
+                        playing = playing,
+                        onPlayPause = ::playPause,
+                        nowPlaying = nowPlaying,
+                        muted = muted,
+                        onToggleMute = ::toggleMute,
+                        onRewind = ::rewind15,
+                        onForward = ::forward15,
+                        onSeek = viewModel::seekToSeconds,
                     )
                 } else {
                     PortraitRemote(
@@ -193,10 +252,16 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
                         press = ::press,
                         hold = ::hold,
                         onSelect = { viewModel.touchTap() },
-                        onDirection = ::press,
                         onLongPress = { hold(HidCommand.Select) },
                         onTouch = viewModel::sendTouch,
-                        onVolume = { up -> press(if (up) HidCommand.VolumeUp else HidCommand.VolumeDown) },
+                        playing = playing,
+                        onPlayPause = ::playPause,
+                        nowPlaying = nowPlaying,
+                        muted = muted,
+                        onToggleMute = ::toggleMute,
+                        onRewind = ::rewind15,
+                        onForward = ::forward15,
+                        onSeek = viewModel::seekToSeconds,
                     )
                 }
             }
@@ -242,6 +307,8 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
             ) {
                 PowerSheet(
                     waking = waking,
+                    volumeKeysControlTv = volumeKeysControlTv,
+                    onVolumeKeysControlTvChange = viewModel::setVolumeKeysControlTv,
                     onDismiss = { powerOpen = false },
                     onWake = { powerOpen = false; viewModel.wake() },
                     onSleep = { powerOpen = false; viewModel.sleep() },
@@ -254,6 +321,8 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
                 viewModel = viewModel,
                 onClose = { appsOpen = false },
             )
+
+
         }
     }
 
@@ -274,58 +343,110 @@ private fun PortraitRemote(
     press: (HidCommand) -> Unit,
     hold: (HidCommand) -> Unit,
     onSelect: () -> Unit,
-    onDirection: (HidCommand) -> Unit,
     onLongPress: () -> Unit,
     onTouch: (Long, Long, TouchPhase) -> Unit,
-    onVolume: (Boolean) -> Unit,
+    playing: Boolean,
+    onPlayPause: () -> Unit,
+    nowPlaying: NowPlaying?,
+    muted: Boolean,
+    onToggleMute: () -> Unit,
+    onRewind: () -> Unit,
+    onForward: () -> Unit,
+    onSeek: (Double) -> Unit,
 ) {
     Column(
         Modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(horizontal = 18.dp, vertical = 8.dp),
+            .padding(vertical = 8.dp),
     ) {
-        RemoteHeader(
-            device = device,
-            connection = connection,
-            focusState = focusState,
-            keyboardOpen = keyboardOpen,
-            onBack = onBack,
-            onKeyboard = onKeyboard,
-            onApps = onApps,
-            onPower = onPower,
-        )
-        ConnectionBanner(connection, connectionError, onReconnect)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp)) {
+            RemoteHeader(
+                device = device,
+                connection = connection,
+                focusState = focusState,
+                keyboardOpen = keyboardOpen,
+                onBack = onBack,
+                onKeyboard = onKeyboard,
+                onApps = onApps,
+                onPower = onPower,
+            )
+            ConnectionBanner(connection, connectionError, onReconnect)
+        }
         Spacer(Modifier.height(8.dp))
-        Box(
+        Column(
             Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            contentAlignment = Alignment.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            RemoteCard(
-                landscape = false,
-                modifier = Modifier
+            nowPlaying?.let { info ->
+                NowPlayingBar(
+                    nowPlaying = info,
+                    playing = playing,
+                    muted = muted,
+                    onPlayPause = onPlayPause,
+                    onToggleMute = onToggleMute,
+                    onRewind = onRewind,
+                    onForward = onForward,
+                    onSeek = onSeek,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp)
+                        .widthIn(max = 420.dp),
+                )
+                Spacer(Modifier.height(24.dp))
+            }
+            Box(
+                Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = 18.dp)
+                    .widthIn(max = 420.dp)
+                    .weight(1f)
+                    .glassPanel(
+                        shape = RoundedCornerShape(44.dp),
+                        fillTop = Color(0xFF232326),
+                        fillBottom = Color(0xFF141416),
+                        border = Color.White.copy(alpha = 0.10f),
+                    ),
+            ) {
+                TouchSurface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    onSelect = onSelect,
+                    onLongPress = onLongPress,
+                    onTouch = onTouch,
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp)
                     .widthIn(max = 420.dp),
-                press = press,
-                hold = hold,
-                onSelect = onSelect,
-                onDirection = onDirection,
-                onLongPress = onLongPress,
-                onTouch = onTouch,
-                onVolume = onVolume,
-            )
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TransportKey(
+                    if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    if (playing) "暂停" else "播放",
+                    96.dp,
+                    36.dp,
+                ) { onPlayPause() }
+                TransportKey(Icons.AutoMirrored.Rounded.ArrowBack, "返回", 120.dp, 46.dp) {
+                    press(HidCommand.Menu)
+                }
+                TransportKey(
+                    Icons.Rounded.Tv,
+                    "主屏幕（长按：控制中心）",
+                    96.dp,
+                    36.dp,
+                    onLongClick = { hold(HidCommand.Home) },
+                ) { press(HidCommand.Home) }
+            }
+            Spacer(Modifier.height(20.dp))
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "轻点选择 · 滑动导航 · 长按打开选项",
-            style = MaterialTheme.typography.labelMedium,
-            color = Palette.TextTertiary,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
-        Spacer(Modifier.height(2.dp))
     }
 }
 
@@ -344,10 +465,16 @@ private fun LandscapeRemote(
     press: (HidCommand) -> Unit,
     hold: (HidCommand) -> Unit,
     onSelect: () -> Unit,
-    onDirection: (HidCommand) -> Unit,
     onLongPress: () -> Unit,
     onTouch: (Long, Long, TouchPhase) -> Unit,
-    onVolume: (Boolean) -> Unit,
+    playing: Boolean,
+    onPlayPause: () -> Unit,
+    nowPlaying: NowPlaying?,
+    muted: Boolean,
+    onToggleMute: () -> Unit,
+    onRewind: () -> Unit,
+    onForward: () -> Unit,
+    onSeek: (Double) -> Unit,
 ) {
     Column(
         Modifier
@@ -367,29 +494,56 @@ private fun LandscapeRemote(
         )
         ConnectionBanner(connection, connectionError, onReconnect)
         Spacer(Modifier.height(6.dp))
-        Box(
+        BoxWithConstraints(
             Modifier
                 .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.Center,
+                .weight(1f)
+                .padding(bottom = 6.dp),
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            BoxWithConstraints(Modifier.fillMaxHeight()) {
-                val cardHeight = maxHeight.coerceAtMost(520.dp)
-                val touchWidth = (cardHeight - 24.dp) * 1.12f
-                val cardWidth = (touchWidth + 154.dp + 36.dp).coerceIn(420.dp, 760.dp)
-                RemoteCard(
-                    landscape = true,
-                    modifier = Modifier
-                        .height(cardHeight)
-                        .width(cardWidth),
-                    press = press,
-                    hold = hold,
-                    onSelect = onSelect,
-                    onDirection = onDirection,
-                    onLongPress = onLongPress,
-                    onTouch = onTouch,
-                    onVolume = onVolume,
-                )
+            // Phone landscape is too short for the strip plus the remote;
+            // only show it when there is height to spare (tablets).
+            val showNowPlaying = nowPlaying != null && maxHeight > 400.dp
+            Column(
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (showNowPlaying) {
+                    nowPlaying?.let { info ->
+                        NowPlayingBar(
+                            nowPlaying = info,
+                            playing = playing,
+                            muted = muted,
+                            onPlayPause = onPlayPause,
+                            onToggleMute = onToggleMute,
+                            onRewind = onRewind,
+                            onForward = onForward,
+                            onSeek = onSeek,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .widthIn(max = 560.dp),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+                BoxWithConstraints(Modifier.fillMaxHeight()) {
+                    val cardHeight = maxHeight.coerceAtMost(520.dp)
+                    val touchWidth = (cardHeight - 24.dp) * 1.12f
+                    val cardWidth = (touchWidth + 154.dp + 36.dp).coerceIn(420.dp, 760.dp)
+                    RemoteCard(
+                        landscape = true,
+                        modifier = Modifier
+                            .width(cardWidth),
+                        fixedHeight = cardHeight,
+                        press = press,
+                        hold = hold,
+                        onSelect = onSelect,
+                        onLongPress = onLongPress,
+                        onTouch = onTouch,
+                        playing = playing,
+                        onPlayPause = onPlayPause,
+                    )
+                }
             }
         }
     }
@@ -535,6 +689,323 @@ private fun ConnectionBanner(
     }
 }
 
+/**
+ * Android 17-style now-playing card above the remote: full-bleed artwork,
+ * elapsed/remaining time around the scrubber, and four equal action buttons
+ * (rewind 15s, play/pause, forward 15s, mute).
+ */
+@Composable
+private fun NowPlayingBar(
+    nowPlaying: NowPlaying,
+    playing: Boolean,
+    muted: Boolean,
+    onPlayPause: () -> Unit,
+    onToggleMute: () -> Unit,
+    onRewind: () -> Unit,
+    onForward: () -> Unit,
+    onSeek: (Double) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val syncedAt = remember(nowPlaying, playing) { SystemClock.elapsedRealtime() }
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(nowPlaying, playing) {
+        while (playing) {
+            delay(1_000)
+            tick++
+        }
+    }
+    val duration = nowPlaying.durationSeconds?.takeIf { it > 0.0 }
+    val elapsed = remember(nowPlaying, playing, tick) {
+        val base = nowPlaying.elapsedSeconds ?: 0.0
+        val rate = nowPlaying.playbackRate?.takeIf { it > 0.0 } ?: 1.0
+        val advance = if (playing) {
+            (SystemClock.elapsedRealtime() - syncedAt).coerceAtLeast(0L) / 1000.0 * rate
+        } else {
+            0.0
+        }
+        val position = base + advance
+        if (duration != null) position.coerceIn(0.0, duration) else position
+    }
+    val progress = if (duration != null) (elapsed / duration).toFloat().coerceIn(0f, 1f) else 0f
+    var dragFraction by remember { mutableStateOf<Float?>(null) }
+    val shownFraction = dragFraction ?: progress
+    val shownElapsed = dragFraction?.let { fraction ->
+        if (duration != null) fraction * duration else elapsed
+    } ?: elapsed
+    val remaining = (duration ?: 0.0) - shownElapsed
+    val artwork = remember(nowPlaying.artwork) {
+        nowPlaying.artwork?.let { bytes ->
+            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+        }
+    }
+
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(160.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .background(Color(0xFF17171B))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(28.dp)),
+    ) {
+        if (artwork != null) {
+            Image(
+                bitmap = artwork.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF2A2F55), Color(0xFF191A28), Color(0xFF0D0D12)),
+                        ),
+                    ),
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.88f),
+                            Color.Black.copy(alpha = 0.45f),
+                            Color.Black.copy(alpha = 0.10f),
+                        ),
+                    ),
+                ),
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.58f)),
+                    ),
+                ),
+        )
+
+        Column(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 12.dp, top = 12.dp, end = 12.dp),
+        ) {
+            Text(
+                nowPlaying.title ?: "正在播放",
+                style = MaterialTheme.typography.titleLarge,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                nowPlaying.artist ?: nowPlaying.album ?: "正在播放",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.72f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (duration != null) {
+            Row(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 68.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    formatPlaybackTime(shownElapsed),
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.82f),
+                    maxLines = 1,
+                )
+                Spacer(Modifier.width(8.dp))
+                Canvas(
+                    Modifier
+                        .weight(1f)
+                        .height(20.dp)
+                        .pointerInput(duration) {
+                            detectTapGestures { offset ->
+                                if (size.width > 0) {
+                                    val fraction =
+                                        (offset.x / size.width).coerceIn(0f, 1f)
+                                    onSeek(fraction * duration)
+                                }
+                            }
+                        }
+                        .pointerInput(duration) {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    if (size.width > 0) {
+                                        dragFraction =
+                                            (offset.x / size.width).coerceIn(0f, 1f)
+                                    }
+                                },
+                                onDrag = { change, _ ->
+                                    if (size.width > 0) {
+                                        dragFraction =
+                                            (change.position.x / size.width).coerceIn(0f, 1f)
+                                    }
+                                    change.consume()
+                                },
+                                onDragEnd = {
+                                    val fraction = dragFraction
+                                    dragFraction = null
+                                    if (fraction != null) {
+                                        onSeek(fraction * duration)
+                                    }
+                                },
+                                onDragCancel = { dragFraction = null },
+                            )
+                        },
+                ) {
+                    val centerY = size.height / 2f
+                    val stroke = 2.dp.toPx()
+                    drawLine(
+                        Color.White.copy(alpha = 0.28f),
+                        Offset(0f, centerY),
+                        Offset(size.width, centerY),
+                        strokeWidth = stroke,
+                        cap = StrokeCap.Round,
+                    )
+                    if (shownFraction > 0f) {
+                        drawLine(
+                            Color.White,
+                            Offset(0f, centerY),
+                            Offset(size.width * shownFraction, centerY),
+                            strokeWidth = stroke,
+                            cap = StrokeCap.Round,
+                        )
+                        drawCircle(
+                            Color.White,
+                            radius = 5.dp.toPx(),
+                            center = Offset(size.width * shownFraction, centerY),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "-${formatPlaybackTime(remaining.coerceAtLeast(0.0))}",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.82f),
+                    maxLines = 1,
+                )
+            }
+        }
+
+        Box(
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                .height(44.dp),
+        ) {
+            Row(
+                Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BarCircleButton(
+                    description = "后退 15 秒",
+                    onClick = onRewind,
+                    background = Color.White.copy(alpha = 0.08f),
+                    borderColor = Color.White.copy(alpha = 0.18f),
+                ) {
+                    Skip15Icon(forward = false, tint = Color.White)
+                }
+                BarCircleButton(
+                    description = if (playing) "暂停" else "播放",
+                    onClick = onPlayPause,
+                    background = Palette.Accent,
+                    borderColor = Color.Transparent,
+                ) {
+                    Icon(
+                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(23.dp),
+                    )
+                }
+                BarCircleButton(
+                    description = "前进 15 秒",
+                    onClick = onForward,
+                    background = Color.White.copy(alpha = 0.08f),
+                    borderColor = Color.White.copy(alpha = 0.18f),
+                ) {
+                    Skip15Icon(forward = true, tint = Color.White)
+                }
+            }
+            BarCircleButton(
+                description = if (muted) "取消静音" else "静音",
+                onClick = onToggleMute,
+                background = if (muted) Color.White.copy(alpha = 0.94f) else Color.White.copy(alpha = 0.08f),
+                borderColor = if (muted) Color.Transparent else Color.White.copy(alpha = 0.18f),
+                modifier = Modifier.align(Alignment.CenterEnd),
+            ) {
+                Icon(
+                    if (muted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
+                    contentDescription = null,
+                    tint = if (muted) Color(0xFF17171B) else Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BarCircleButton(
+    description: String,
+    onClick: () -> Unit,
+    background: Color,
+    borderColor: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(background)
+            .border(1.dp, borderColor, CircleShape)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun Skip15Icon(forward: Boolean, tint: Color) {
+    Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+        Icon(
+            Icons.Rounded.Replay,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { scaleX = if (forward) -1f else 1f },
+        )
+    }
+}
+
+private fun formatPlaybackTime(seconds: Double): String {
+    val total = seconds.toLong().coerceAtLeast(0L)
+    val hours = total / 3600
+    val minutes = (total % 3600) / 60
+    val secs = (total % 60).toString().padStart(2, '0')
+    return if (hours > 0) {
+        "$hours:${minutes.toString().padStart(2, '0')}:$secs"
+    } else {
+        "$minutes:$secs"
+    }
+}
+
 @Composable
 private fun RemoteCard(
     landscape: Boolean,
@@ -542,13 +1013,21 @@ private fun RemoteCard(
     press: (HidCommand) -> Unit,
     hold: (HidCommand) -> Unit,
     onSelect: () -> Unit,
-    onDirection: (HidCommand) -> Unit,
     onLongPress: () -> Unit,
     onTouch: (Long, Long, TouchPhase) -> Unit,
-    onVolume: (Boolean) -> Unit,
+    playing: Boolean,
+    onPlayPause: () -> Unit,
+    fixedHeight: androidx.compose.ui.unit.Dp? = null,
 ) {
     Box(
         modifier
+            .then(
+                if (fixedHeight != null) {
+                    Modifier.height(fixedHeight)
+                } else {
+                    Modifier
+                },
+            )
             .glassPanel(
                 shape = RoundedCornerShape(44.dp),
                 fillTop = Color(0xFF232326),
@@ -581,7 +1060,6 @@ private fun RemoteCard(
                         .fillMaxHeight()
                         .aspectRatio(1.12f),
                     onSelect = onSelect,
-                    onDirection = onDirection,
                     onLongPress = onLongPress,
                     onTouch = onTouch,
                 )
@@ -593,15 +1071,18 @@ private fun RemoteCard(
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    TransportKey(Icons.AutoMirrored.Rounded.ArrowBack, "返回", 52.dp, 22.dp) { press(HidCommand.Menu) }
+                    TransportKey(
+                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        if (playing) "暂停" else "播放",
+                        52.dp,
+                        23.dp,
+                    ) { onPlayPause() }
                     Spacer(Modifier.height(9.dp))
-                    TransportKey(Icons.Rounded.Tv, "主屏幕（长按：控制中心）", 52.dp, 22.dp, onLongClick = { hold(HidCommand.Home) }) {
+                    TransportKey(Icons.AutoMirrored.Rounded.ArrowBack, "返回", 64.dp, 28.dp) { press(HidCommand.Menu) }
+                    Spacer(Modifier.height(9.dp))
+                    TransportKey(Icons.Rounded.Tv, "主屏幕（长按：控制中心）", 52.dp, 23.dp, onLongClick = { hold(HidCommand.Home) }) {
                         press(HidCommand.Home)
                     }
-                    Spacer(Modifier.height(9.dp))
-                    TransportKey(Icons.Rounded.PlayArrow, "播放 / 暂停", 52.dp, 23.dp) { press(HidCommand.PlayPause) }
-                    Spacer(Modifier.height(11.dp))
-                    VolumeBar(onVolume = onVolume, compact = true)
                 }
             }
         } else {
@@ -610,12 +1091,18 @@ private fun RemoteCard(
                     .fillMaxWidth()
                     .padding(14.dp),
             ) {
-                TouchSurface(
-                    modifier = Modifier
+                val touchModifier = if (fixedHeight != null) {
+                    Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1.02f),
+                        .weight(1f)
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1.02f)
+                }
+                TouchSurface(
+                    modifier = touchModifier,
                     onSelect = onSelect,
-                    onDirection = onDirection,
                     onLongPress = onLongPress,
                     onTouch = onTouch,
                 )
@@ -625,7 +1112,13 @@ private fun RemoteCard(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TransportKey(Icons.AutoMirrored.Rounded.ArrowBack, "返回", 64.dp, 26.dp) { press(HidCommand.Menu) }
+                    TransportKey(
+                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        if (playing) "暂停" else "播放",
+                        64.dp,
+                        28.dp,
+                    ) { onPlayPause() }
+                    TransportKey(Icons.AutoMirrored.Rounded.ArrowBack, "返回", 80.dp, 32.dp) { press(HidCommand.Menu) }
                     TransportKey(
                         Icons.Rounded.Tv,
                         "主屏幕（长按：控制中心）",
@@ -633,12 +1126,7 @@ private fun RemoteCard(
                         27.dp,
                         onLongClick = { hold(HidCommand.Home) },
                     ) { press(HidCommand.Home) }
-                    TransportKey(Icons.Rounded.PlayArrow, "播放 / 暂停", 64.dp, 28.dp) {
-                        press(HidCommand.PlayPause)
-                    }
                 }
-                Spacer(Modifier.height(14.dp))
-                VolumeBar(onVolume = onVolume)
             }
         }
     }
@@ -663,71 +1151,6 @@ private fun TransportKey(
     )
 }
 
-@Composable
-private fun VolumeBar(
-    onVolume: (Boolean) -> Unit,
-    compact: Boolean = false,
-) {
-    val haptics = LocalHapticFeedback.current
-    val height = if (compact) 42.dp else 48.dp
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(height)
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.055f))
-            .border(1.dp, Color.White.copy(alpha = 0.07f), CircleShape)
-            .padding(horizontal = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        VolumeStepButton(
-            icon = Icons.Rounded.Remove,
-            description = "音量 −",
-            modifier = Modifier.size(height),
-        ) {
-            runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
-            onVolume(false)
-        }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            Text(
-                "音量",
-                style = MaterialTheme.typography.labelMedium,
-                color = Palette.TextTertiary,
-            )
-        }
-        VolumeStepButton(
-            icon = Icons.Rounded.Add,
-            description = "音量 +",
-            modifier = Modifier.size(height),
-        ) {
-            runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
-            onVolume(true)
-        }
-    }
-}
-
-@Composable
-private fun VolumeStepButton(
-    icon: ImageVector,
-    description: String,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier
-            .clip(CircleShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            icon,
-            contentDescription = description,
-            tint = Palette.TextSecondary,
-            modifier = Modifier.size(18.dp),
-        )
-    }
-}
-
 /**
  * The Siri-Remote-style surface.
  *
@@ -739,7 +1162,6 @@ private fun VolumeStepButton(
 private fun TouchSurface(
     modifier: Modifier,
     onSelect: () -> Unit,
-    onDirection: (HidCommand) -> Unit,
     onLongPress: () -> Unit,
     onTouch: (Long, Long, TouchPhase) -> Unit,
 ) {
@@ -770,7 +1192,6 @@ private fun TouchSurface(
                     var lastTime = down.uptimeMillis
                     var vx = (start.x / width * 1000f).coerceIn(0f, 1000f)
                     var vy = (start.y / height * 1000f).coerceIn(0f, 1000f)
-                    var up = start
                     var dragged = false
                     var longPressed = false
                     var ended = false
@@ -788,7 +1209,6 @@ private fun TouchSurface(
                             break
                         }
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        up = change.position
                         if (change.changedToUp()) {
                             ended = true
                             break
@@ -846,46 +1266,13 @@ private fun TouchSurface(
                     touchPoint = null
                     if (!ended) return@awaitEachGesture
 
-                    // A rim tap is a directional click; the centre selects.
-                    val centre = Offset(width / 2f, height / 2f)
-                    val mid = Offset((start.x + up.x) / 2f, (start.y + up.y) / 2f)
-                    val radius = min(width, height) * 0.36f
-                    if ((mid - centre).getDistance() < radius) {
-                        runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
-                        onSelect()
-                    } else {
-                        val dx = mid.x - centre.x
-                        val dy = mid.y - centre.y
-                        val direction = if (abs(dx) > abs(dy)) {
-                            if (dx > 0) HidCommand.Right else HidCommand.Left
-                        } else {
-                            if (dy > 0) HidCommand.Down else HidCommand.Up
-                        }
-                        runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
-                        onDirection(direction)
-                    }
+                    // The whole surface is a trackpad: any tap selects.
+                    runCatching { haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
+                    onSelect()
                 }
             },
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            val radius = min(size.width, size.height) * 0.30f
-            drawCircle(
-                color = Color.White.copy(alpha = 0.022f),
-                radius = radius,
-                center = center,
-            )
-            drawCircle(
-                color = Color.White.copy(alpha = 0.045f),
-                radius = radius,
-                center = center,
-                style = Stroke(width = 1.dp.toPx()),
-            )
-            drawCircle(
-                color = Color.White.copy(alpha = 0.018f),
-                radius = radius * 0.55f,
-                center = center,
-                style = Stroke(width = 0.7.dp.toPx()),
-            )
             touchPoint?.let { point ->
                 drawCircle(
                     brush = Brush.radialGradient(
@@ -899,50 +1286,6 @@ private fun TouchSurface(
             }
         }
 
-        Icon(
-            Icons.Rounded.KeyboardArrowUp,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.17f),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 10.dp)
-                .size(24.dp),
-        )
-        Icon(
-            Icons.Rounded.KeyboardArrowDown,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.17f),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 10.dp)
-                .size(24.dp),
-        )
-        Icon(
-            Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.17f),
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .padding(start = 10.dp)
-                .size(24.dp),
-        )
-        Icon(
-            Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.17f),
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 10.dp)
-                .size(24.dp),
-        )
-        Text(
-            "轻点 · 滑动",
-            style = MaterialTheme.typography.labelMedium,
-            color = Color.White.copy(alpha = 0.20f),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 40.dp),
-        )
     }
 }
 
@@ -954,18 +1297,25 @@ private fun touchGain(distancePx: Float, dtSeconds: Float, referencePx: Float): 
 @Composable
 private fun PowerSheet(
     waking: Boolean,
+    volumeKeysControlTv: Boolean,
+    onVolumeKeysControlTvChange: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     onWake: () -> Unit,
     onSleep: () -> Unit,
     onControlCenter: () -> Unit,
 ) {
-    Box(
+    BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.58f))
             .clickable(onClick = onDismiss),
         contentAlignment = Alignment.BottomCenter,
     ) {
+        // Landscape phones are short: trim the decorative spacing so the
+        // cancel button stays on screen instead of hiding below the fold.
+        val compact = maxHeight < 620.dp
+        val sectionGap = if (compact) 10.dp else 16.dp
+        val actionGap = if (compact) 6.dp else 8.dp
         Column(
             Modifier
                 .fillMaxWidth()
@@ -973,17 +1323,27 @@ private fun PowerSheet(
                 .background(Brush.verticalGradient(listOf(Color(0xFF232326), Color(0xFF151517))))
                 .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp))
                 .clickable {}
+                .then(
+                    if (compact) {
+                        Modifier.windowInsetsPadding(WindowInsets.statusBars)
+                    } else {
+                        Modifier
+                    },
+                )
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = if (compact) 8.dp else 14.dp),
         ) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .size(width = 38.dp, height = 4.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.18f)),
-            )
-            Spacer(Modifier.height(18.dp))
+            if (!compact) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .size(width = 38.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.18f)),
+                )
+                Spacer(Modifier.height(18.dp))
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "电源与控制",
@@ -998,41 +1358,97 @@ private fun PowerSheet(
                     size = 34.dp,
                 )
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(sectionGap))
             PowerAction(
                 icon = Icons.Rounded.WbSunny,
                 title = "唤醒 Apple TV",
                 subtitle = "从睡眠中唤醒电视",
                 loading = waking,
+                compact = compact,
                 onClick = onWake,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(actionGap))
             PowerAction(
                 icon = Icons.Rounded.DarkMode,
                 title = "进入睡眠",
                 subtitle = "让 Apple TV 进入待机",
+                compact = compact,
                 onClick = onSleep,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(actionGap))
             PowerAction(
                 icon = Icons.Rounded.Tune,
                 title = "打开控制中心",
                 subtitle = "显示 tvOS 控制中心",
+                compact = compact,
                 onClick = onControlCenter,
             )
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(actionGap))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.White.copy(alpha = 0.055f))
+                    .padding(
+                        start = 14.dp,
+                        end = 10.dp,
+                        top = if (compact) 5.dp else 8.dp,
+                        bottom = if (compact) 5.dp else 8.dp,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.08f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Rounded.VolumeUp,
+                        contentDescription = null,
+                        tint = Palette.TextPrimary,
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "音量键控制电视",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Palette.TextPrimary,
+                    )
+                    Text(
+                        "遥控界面按手机音量键调节电视",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Palette.TextTertiary,
+                    )
+                }
+                Switch(
+                    checked = volumeKeysControlTv,
+                    onCheckedChange = onVolumeKeysControlTvChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Palette.Accent,
+                        uncheckedThumbColor = Palette.TextSecondary,
+                        uncheckedTrackColor = Color.White.copy(alpha = 0.10f),
+                        uncheckedBorderColor = Color.White.copy(alpha = 0.18f),
+                    ),
+                )
+            }
+            Spacer(Modifier.height(actionGap))
             Box(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
                     .background(Color.White.copy(alpha = 0.08f))
                     .clickable(onClick = onDismiss)
-                    .padding(vertical = 13.dp),
+                    .padding(vertical = if (compact) 10.dp else 13.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("取消", style = MaterialTheme.typography.titleMedium, color = Palette.TextPrimary)
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
         }
     }
 }
@@ -1043,6 +1459,7 @@ private fun PowerAction(
     title: String,
     subtitle: String,
     loading: Boolean = false,
+    compact: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(
@@ -1051,7 +1468,7 @@ private fun PowerAction(
             .clip(RoundedCornerShape(18.dp))
             .background(Color.White.copy(alpha = 0.055f))
             .clickable(enabled = !loading, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 13.dp),
+            .padding(horizontal = 14.dp, vertical = if (compact) 10.dp else 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(

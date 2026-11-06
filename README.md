@@ -27,12 +27,14 @@ GitHub 仓库：<https://github.com/H2FE1/TVRemote> · [Releases](https://github
 - **mDNS 自动发现** Apple TV（`_companion-link._tcp`）
 - **4 位 PIN 配对**，配对握手成功后自动连接
 - **Siri Remote 风格触控板**
-  - 轻点中心 = 选择
+  - 整块区域轻点 = 选择
   - 滑动 = 连续方向 / 滚动，带指针加速度曲线
-  - 轻点边缘 = 上 / 下 / 左 / 右
   - 长按 = 打开上下文菜单
-- 返回、主屏幕（长按主屏幕键 = 打开 tvOS 控制中心）、播放 / 暂停
-- 音量 + / −（取决于 Apple TV 的 HDMI-CEC / 音量路由能力）
+- 返回、主屏幕（长按主屏幕键 = 打开 tvOS 控制中心）、播放 / 暂停（图标跟随电视播放状态）
+- **正在播放**：Android 17 风全幅封面卡（位于遥控器顶部），显示标题、进度、剩余时间、±15 秒、静音和播放 / 暂停按钮；部分 App 不上报媒体信息
+- **锁屏控制**：只要电视在播放/暂停（视频或音频，无论当前 App 是否上报标题），锁屏和通知栏都出现系统媒体卡，支持播放 / 暂停、±15 秒、静音；点标题回到遥控器，主界面 / 休眠 / 无播放时自动消失
+
+- **手机音量键**直接调节电视音量（可在「电源与控制」里关闭；取决于 Apple TV 的 HDMI-CEC / 音量路由能力）
 - 电源面板：唤醒、进入睡眠、打开控制中心
 - **键盘输入**：电视上出现输入框时自动弹出手机键盘，实时同步到电视搜索框
 - **App 启动器**：从 Apple TV 读取可启动 App 列表并直接启动
@@ -42,7 +44,7 @@ GitHub 仓库：<https://github.com/H2FE1/TVRemote> · [Releases](https://github
 
 ## 安装
 
-1. 从 [Releases](https://github.com/H2FE1/TVRemote/releases/latest) 下载 `TVRemote-1.0.0.apk`，或使用仓库内的 [`dist/TVRemote-1.0.0.apk`](dist/TVRemote-1.0.0.apk)（需要允许“安装未知来源应用”）。
+1. 从 [Releases](https://github.com/H2FE1/TVRemote/releases/latest) 下载 `TVRemote-1.1.0.apk`，或使用仓库内的 [`dist/TVRemote-1.1.0.apk`](dist/TVRemote-1.1.0.apk)（需要允许“安装未知来源应用”）。
 2. 手机和 Apple TV 连接到**同一个 Wi-Fi / 子网**。
 3. 打开 App，轻点发现的 Apple TV。
 4. 输入电视屏幕上显示的 4 位配对码。
@@ -98,7 +100,12 @@ docs/screenshots/            界面截图
 
 - Apple TV 3 及更早机型使用旧的 DMAP 协议，**不支持**。
 - 音量的可用性取决于音响路由方式：如果 Siri Remote 通过红外直接控制音响，Apple TV 不在音量链路中，网络客户端无法调音量。
-- 当前版本**没有**“正在播放”封面、Siri 语音、AirPlay 投屏和红外功能。
+- 手机音量键只在遥控器页面位于前台、且已连接 Apple TV 时生效；离开该页面后音量键恢复控制手机音量。
+- 静音键通过 Companion 的绝对音量接口（GetVolume / SetVolume）实现，需要 Apple TV 在音量链路中（HDMI-CEC）；如果音响由 Siri Remote 红外直控，这个按钮可能无效。
+- 锁屏卡片由 Android 系统渲染，不是 App 内那条自定义卡；外观随系统版本（Android 17 上就是原生媒体卡），需要通知权限。
+- 连接期间会保留一个低优先级「已连接」前台服务通知（锁屏不可见），用于在后台/锁屏时继续接收电视的播放状态；断开后自动消失。
+- 当前版本**不包含**截图 / 屏幕接收功能。
+- 当前版本**没有** Siri 语音、AirPlay 投屏和红外功能。
 - Companion Link 是 Apple 未公开的协议，tvOS 更新可能改变其行为。协议实现参考了 pyatv 的公开逆向工程成果。
 - 本机已用局域网中的 Apple TV 4K 实测 **mDNS 发现和配对流程（电视成功显示配对码）**；由于自动化环境无法读取电视屏幕上的 PIN，未能完成端到端按键验证。实际使用前请按上方步骤完成一次配对。
 

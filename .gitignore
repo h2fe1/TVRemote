@@ -16,3 +16,11 @@ keystore/
 # Local tooling and temporary GitHub auth
 .tools/
 .gh-config/
+
+# Locally installed SDK / Rust toolchain and scratch files (never part of the app)
+.android-sdk/
+.cargo/
+.rust/
+.home/
+.tmp/
+native/**/target/

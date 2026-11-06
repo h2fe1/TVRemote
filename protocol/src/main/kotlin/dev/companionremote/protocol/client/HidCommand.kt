@@ -22,8 +22,8 @@ enum class HidCommand(val code: Long) {
     ChannelIncrement(15),
     ChannelDecrement(16),
     Guide(17),
-    PageUp(18),
-    PageDown(19),
+    Mute(18),
+    Power(19),
 }
 
 /** Media Control commands (`api.py MediaControlCommand`). */

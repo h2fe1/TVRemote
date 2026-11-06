@@ -11,6 +11,33 @@ object KeyedArchiver {
      * Read properties from a keyed archive by following UID references,
      * starting at `$top`. Returns null for a path that doesn't resolve.
      */
+    /**
+     * Fully resolve an NSKeyedArchiver plist into plain maps/lists/scalars.
+     * UIDs are followed through `$objects`, class metadata is dropped and
+     * recursion is depth-limited so a malformed archive cannot loop.
+     */
+    fun decodeArchive(archive: ByteArray): Any? {
+        val root = runCatching { BinaryPlist.decode(archive) }.getOrNull() as? Map<*, *>
+            ?: return null
+        val objects = root["\$objects"] as? List<*> ?: return null
+        val top = root["\$top"] as? Map<*, *> ?: return null
+
+        fun resolve(value: Any?, depth: Int): Any? {
+            if (depth > 32) return null
+            return when (value) {
+                is PlistUid -> objects.getOrNull(value.value.toInt())
+                    ?.let { resolve(it, depth + 1) }
+                is Map<*, *> -> value.entries
+                    .filter { it.key != "\$class" }
+                    .associate { it.key.toString() to resolve(it.value, depth + 1) }
+                is List<*> -> value.map { resolve(it, depth + 1) }
+                else -> value
+            }
+        }
+
+        return resolve(top["root"], 0)
+    }
+
     fun readArchiveProperties(archive: ByteArray, vararg paths: List<String>): List<Any?> {
         val root = runCatching { BinaryPlist.decode(archive) }.getOrNull() as? Map<*, *>
             ?: return paths.map { null }
