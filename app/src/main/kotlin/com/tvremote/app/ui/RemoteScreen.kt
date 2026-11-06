@@ -86,18 +86,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -115,9 +116,8 @@ import dev.companionremote.protocol.client.HidCommand
 import dev.companionremote.protocol.client.KeyboardFocusState
 import dev.companionremote.protocol.client.NowPlaying
 import dev.companionremote.protocol.client.PlaybackState
+import dev.companionremote.protocol.client.SystemStatus
 import dev.companionremote.protocol.client.TouchPhase
-import kotlin.math.abs
-import kotlin.math.min
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -130,7 +130,12 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
     val waking by viewModel.waking.collectAsState()
     val volumeKeysControlTv by viewModel.volumeKeysControlTv.collectAsState()
     val playback by viewModel.playbackState.collectAsState()
-    val playing = playback == PlaybackState.Playing
+    val tvPower by viewModel.tvPower.collectAsState()
+    // Screensaver / sleep means nothing is being watched: never leave the
+    // play-pause controls showing "pause" because of a stale transport state.
+    val playing = playback == PlaybackState.Playing &&
+        tvPower != SystemStatus.Asleep &&
+        tvPower != SystemStatus.Screensaver
     val nowPlaying by viewModel.displayNowPlaying.collectAsState()
     val muted by viewModel.muted.collectAsState()
     val uiMessage by viewModel.message.collectAsState()
@@ -163,6 +168,10 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
     fun playPause() {
         buzz()
         viewModel.playPause()
+    }
+    fun togglePlayback() {
+        buzz()
+        viewModel.togglePlayback()
     }
     fun toggleMute() {
         buzz()
@@ -230,6 +239,7 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
                         onTouch = viewModel::sendTouch,
                         playing = playing,
                         onPlayPause = ::playPause,
+                        onTogglePlayback = ::togglePlayback,
                         nowPlaying = nowPlaying,
                         muted = muted,
                         onToggleMute = ::toggleMute,
@@ -256,6 +266,7 @@ fun RemoteScreen(viewModel: AppViewModel, device: DiscoveredAtv) {
                         onTouch = viewModel::sendTouch,
                         playing = playing,
                         onPlayPause = ::playPause,
+                        onTogglePlayback = ::togglePlayback,
                         nowPlaying = nowPlaying,
                         muted = muted,
                         onToggleMute = ::toggleMute,
@@ -347,6 +358,7 @@ private fun PortraitRemote(
     onTouch: (Long, Long, TouchPhase) -> Unit,
     playing: Boolean,
     onPlayPause: () -> Unit,
+    onTogglePlayback: () -> Unit,
     nowPlaying: NowPlaying?,
     muted: Boolean,
     onToggleMute: () -> Unit,
@@ -385,7 +397,7 @@ private fun PortraitRemote(
                     nowPlaying = info,
                     playing = playing,
                     muted = muted,
-                    onPlayPause = onPlayPause,
+                    onPlayPause = onTogglePlayback,
                     onToggleMute = onToggleMute,
                     onRewind = onRewind,
                     onForward = onForward,
@@ -429,8 +441,8 @@ private fun PortraitRemote(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TransportKey(
-                    if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    if (playing) "暂停" else "播放",
+                    PlayPauseKeyIcon,
+                    "播放 / 暂停",
                     96.dp,
                     36.dp,
                 ) { onPlayPause() }
@@ -469,6 +481,7 @@ private fun LandscapeRemote(
     onTouch: (Long, Long, TouchPhase) -> Unit,
     playing: Boolean,
     onPlayPause: () -> Unit,
+    onTogglePlayback: () -> Unit,
     nowPlaying: NowPlaying?,
     muted: Boolean,
     onToggleMute: () -> Unit,
@@ -514,7 +527,7 @@ private fun LandscapeRemote(
                             nowPlaying = info,
                             playing = playing,
                             muted = muted,
-                            onPlayPause = onPlayPause,
+                            onPlayPause = onTogglePlayback,
                             onToggleMute = onToggleMute,
                             onRewind = onRewind,
                             onForward = onForward,
@@ -540,7 +553,6 @@ private fun LandscapeRemote(
                         onSelect = onSelect,
                         onLongPress = onLongPress,
                         onTouch = onTouch,
-                        playing = playing,
                         onPlayPause = onPlayPause,
                     )
                 }
@@ -1015,7 +1027,6 @@ private fun RemoteCard(
     onSelect: () -> Unit,
     onLongPress: () -> Unit,
     onTouch: (Long, Long, TouchPhase) -> Unit,
-    playing: Boolean,
     onPlayPause: () -> Unit,
     fixedHeight: androidx.compose.ui.unit.Dp? = null,
 ) {
@@ -1072,8 +1083,8 @@ private fun RemoteCard(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     TransportKey(
-                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        if (playing) "暂停" else "播放",
+                        PlayPauseKeyIcon,
+                        "播放 / 暂停",
                         52.dp,
                         23.dp,
                     ) { onPlayPause() }
@@ -1113,8 +1124,8 @@ private fun RemoteCard(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     TransportKey(
-                        if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        if (playing) "暂停" else "播放",
+                        PlayPauseKeyIcon,
+                        "播放 / 暂停",
                         64.dp,
                         28.dp,
                     ) { onPlayPause() }
@@ -1131,6 +1142,39 @@ private fun RemoteCard(
         }
     }
 }
+
+/**
+ * The play/pause symbol printed on the physical Siri Remote key: a play
+ * triangle followed by two pause bars, drawn as a single static glyph. Using
+ * one symbol (instead of swapping PlayArrow / Pause) matches the hardware
+ * remote, whose key never changes appearance with the playback state.
+ */
+private val PlayPauseKeyIcon: ImageVector = ImageVector.Builder(
+    name = "PlayPauseKey",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        // Play triangle.
+        moveTo(2f, 4.5f)
+        lineTo(2f, 19.5f)
+        lineTo(12f, 12f)
+        close()
+        // Two pause bars.
+        moveTo(14.5f, 4.5f)
+        lineTo(17.5f, 4.5f)
+        lineTo(17.5f, 19.5f)
+        lineTo(14.5f, 19.5f)
+        close()
+        moveTo(19f, 4.5f)
+        lineTo(22f, 4.5f)
+        lineTo(22f, 19.5f)
+        lineTo(19f, 19.5f)
+        close()
+    }
+}.build()
 
 @Composable
 private fun TransportKey(
@@ -1154,9 +1198,11 @@ private fun TransportKey(
 /**
  * The Siri-Remote-style surface.
  *
- * A centre tap is Select, a tap on the rim is a directional click, holding
- * opens the context menu, and dragging streams accelerated touch coordinates
- * so tvOS gets the same kind of finger movement as a physical trackpad.
+ * A tap is Select, holding opens the context menu, and dragging streams the
+ * finger position to tvOS in the Companion touchpad's 0..1000 space. Position
+ * mapping is done by [touchPadPoint]; it is absolute (edges stay edges) and
+ * never lets the virtual finger stop while the physical finger is still
+ * moving.
  */
 @Composable
 private fun TouchSurface(
@@ -1189,9 +1235,6 @@ private fun TouchSurface(
                     val height = size.height.toFloat().coerceAtLeast(1f)
                     val start = down.position
                     var last = start
-                    var lastTime = down.uptimeMillis
-                    var vx = (start.x / width * 1000f).coerceIn(0f, 1000f)
-                    var vy = (start.y / height * 1000f).coerceIn(0f, 1000f)
                     var dragged = false
                     var longPressed = false
                     var ended = false
@@ -1215,15 +1258,15 @@ private fun TouchSurface(
                         }
                         if ((change.position - start).getDistance() > moveSlop) {
                             dragged = true
-                            onTouch(vx.toLong(), vy.toLong(), TouchPhase.Press)
-                            val delta = change.position - last
-                            val dt = ((change.uptimeMillis - lastTime) / 1000f).coerceAtLeast(0.001f)
-                            val gain = touchGain(delta.getDistance(), dt, 300.dp.toPx())
-                            vx = (vx + delta.x / (300.dp.toPx()) * 1000f * gain).coerceIn(0f, 1000f)
-                            vy = (vy + delta.y / (300.dp.toPx()) * 1000f * gain).coerceIn(0f, 1000f)
+                            // Anchor the press where the finger went down, but
+                            // do not emit a Hold for this same event: the
+                            // press and the first move would carry the same
+                            // timestamp, which tvOS reads as a teleport with
+                            // infinite velocity.
+                            val press = touchPadPoint(start.x, start.y, width, height)
+                            onTouch(press.x, press.y, TouchPhase.Press)
                             last = change.position
-                            lastTime = change.uptimeMillis
-                            onTouch(vx.toLong(), vy.toLong(), TouchPhase.Hold)
+                            touchPoint = last
                             change.consume()
                             break
                         }
@@ -1245,21 +1288,16 @@ private fun TouchSurface(
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            val now = change.uptimeMillis
-                            val dt = ((now - lastTime) / 1000f).coerceAtLeast(0.001f)
-                            val delta = change.position - last
-                            val gain = touchGain(delta.getDistance(), dt, 300.dp.toPx())
-                            vx = (vx + delta.x / (300.dp.toPx()) * 1000f * gain).coerceIn(0f, 1000f)
-                            vy = (vy + delta.y / (300.dp.toPx()) * 1000f * gain).coerceIn(0f, 1000f)
                             last = change.position
-                            lastTime = now
-                            touchPoint = change.position
-                            onTouch(vx.toLong(), vy.toLong(), TouchPhase.Hold)
+                            touchPoint = last
                             if (!change.pressed) break
+                            val point = touchPadPoint(last.x, last.y, width, height)
+                            onTouch(point.x, point.y, TouchPhase.Hold)
                             change.consume()
                         }
-                        onTouch(vx.toLong(), vy.toLong(), TouchPhase.Release)
+                        val end = touchPadPoint(last.x, last.y, width, height)
                         touchPoint = null
+                        onTouch(end.x, end.y, TouchPhase.Release)
                         return@awaitEachGesture
                     }
 
@@ -1287,11 +1325,6 @@ private fun TouchSurface(
         }
 
     }
-}
-
-private fun touchGain(distancePx: Float, dtSeconds: Float, referencePx: Float): Float {
-    val speed = (distancePx / referencePx) / dtSeconds.coerceAtLeast(0.001f)
-    return (0.85f + speed * 0.65f).coerceIn(0.85f, 3.2f)
 }
 
 @Composable

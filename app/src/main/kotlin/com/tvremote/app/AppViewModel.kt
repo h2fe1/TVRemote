@@ -149,10 +149,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         LockScreenMedia.commandHandler = { command ->
             when (command) {
                 LockScreenCommand.Play -> {
-                    if (playbackState.value != PlaybackState.Playing) playPause()
+                    if (playbackState.value != PlaybackState.Playing) togglePlayback()
                 }
                 LockScreenCommand.Pause -> {
-                    if (playbackState.value == PlaybackState.Playing) playPause()
+                    if (playbackState.value == PlaybackState.Playing) togglePlayback()
                 }
                 LockScreenCommand.Rewind15 -> skipBy(-15.0)
                 LockScreenCommand.Forward15 -> skipBy(15.0)
@@ -198,7 +198,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     artist = display.artist ?: display.album ?: "正在播放",
                     durationMs = ((display.durationSeconds ?: 0.0) * 1000.0).toLong(),
                     positionMs = ((display.elapsedSeconds ?: 0.0) * 1000.0).toLong(),
-                    isPlaying = playback == PlaybackState.Playing,
+                    isPlaying = playback == PlaybackState.Playing &&
+                        power != SystemStatus.Asleep &&
+                        power != SystemStatus.Screensaver,
                     muted = isMuted,
                     artwork = display.artwork,
                 )
@@ -566,11 +568,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun holdButton(command: HidCommand) = withClient { it.holdButton(command, holdMs = 700) }
 
     /**
-     * Sends the Siri Remote play/pause toggle. The TV decides which way to
-     * toggle (and pushes the resulting state back through `_iMC`), so the
-     * button still does the right thing if playback was changed elsewhere.
+     * The physical Siri Remote play/pause key: a plain HID button press
+     * (down + up), exactly what the hardware remote sends. Some tvOS apps
+     * only react to this key — for example by refreshing a list — instead of
+     * treating it as a media transport command, so this is deliberately not
+     * `_mcc` Play/Pause. The TV decides which way to toggle and pushes the
+     * resulting state back through `_iMC`.
      */
     fun playPause() {
+        if (demoMode.value) {
+            playbackState.value = if (playbackState.value == PlaybackState.Playing) {
+                PlaybackState.Paused
+            } else {
+                PlaybackState.Playing
+            }
+            return
+        }
+        pressButton(HidCommand.PlayPause)
+    }
+
+    /**
+     * Explicit transport play/pause, used by the in-app now-playing card and
+     * the lock-screen card where a real "play" / "pause" command is wanted
+     * (and the icon flips immediately). More reliable than the HID toggle in
+     * apps that ignore the physical key for transport.
+     */
+    fun togglePlayback() {
         if (demoMode.value) {
             playbackState.value = if (playbackState.value == PlaybackState.Playing) {
                 PlaybackState.Paused
@@ -743,7 +766,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun observePower(activeClient: CompanionClient) {
         powerJob?.cancel()
         powerJob = viewModelScope.launch {
-            activeClient.systemStatus.collect { tvPower.value = it }
+            // A screensaver might already be running when we (re)connect, and
+            // not every tvOS version pushes the state right away.
+            launch {
+                runCatching { activeClient.fetchAttentionState() }.getOrNull()?.let { status ->
+                    if (tvPower.value == SystemStatus.Unknown) applyPowerStatus(status)
+                }
+            }
+            activeClient.systemStatus.collect { status -> applyPowerStatus(status) }
+        }
+    }
+
+    /**
+     * Sleep and the screensaver both mean nothing is being watched. Reset the
+     * transport state to paused so the in-app card, the lock-screen media card
+     * and the notification action all show the play icon instead of a stale
+     * pause icon; a real `_iMC` update after waking still takes over.
+     */
+    private fun applyPowerStatus(status: SystemStatus) {
+        tvPower.value = status
+        if ((status == SystemStatus.Asleep || status == SystemStatus.Screensaver) &&
+            playbackState.value == PlaybackState.Playing
+        ) {
+            // Only "playing" needs the reset: stopped must stay stopped so the
+            // pending now-playing teardown still runs, and paused already shows
+            // the play icon.
+            playbackState.value = PlaybackState.Paused
         }
     }
 
