@@ -572,8 +572,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * (down + up), exactly what the hardware remote sends. Some tvOS apps
      * only react to this key — for example by refreshing a list — instead of
      * treating it as a media transport command, so this is deliberately not
-     * `_mcc` Play/Pause. The TV decides which way to toggle and pushes the
-     * resulting state back through `_iMC`.
+     * `_mcc` Play/Pause.
+     *
+     * tvOS does not push a fresh `_iMC` for every app after this key, so the
+     * card icon is flipped optimistically (and reverted if the press fails);
+     * a real `_iMC` update still wins if one arrives.
      */
     fun playPause() {
         if (demoMode.value) {
@@ -584,7 +587,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        pressButton(HidCommand.PlayPause)
+        if (connectionState.value != ConnectionState.Connected) return
+        val previous = playbackState.value
+        // Only flip an existing transport state: in an app that merely uses
+        // the key to refresh a list (no media), inventing "Playing" would pop
+        // a fake now-playing card.
+        val target = when (previous) {
+            PlaybackState.Playing -> PlaybackState.Paused
+            PlaybackState.Paused -> PlaybackState.Playing
+            else -> null
+        }
+        if (target != null) playbackState.value = target
+        withClient { active ->
+            try {
+                active.pressButton(HidCommand.PlayPause)
+            } catch (e: Exception) {
+                if (target != null) playbackState.value = previous
+                throw e
+            }
+        }
     }
 
     /**
@@ -723,7 +744,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun touchTap() = withClient { it.tap() }
+    /**
+     * A tap on the touchpad is Select. In most media apps selecting a title
+     * starts/resumes playback, but tvOS does not reliably push a fresh `_iMC`
+     * for third-party apps, so a paused card is flipped to "playing"
+     * optimistically. A real `_iMC` update still wins if one arrives.
+     */
+    fun touchTap() {
+        if (demoMode.value) {
+            playbackState.value = PlaybackState.Playing
+            return
+        }
+        if (playbackState.value != PlaybackState.Paused) {
+            withClient { it.tap() }
+            return
+        }
+        val previous = playbackState.value
+        playbackState.value = PlaybackState.Playing
+        withClient { active ->
+            try {
+                active.tap()
+            } catch (e: Exception) {
+                playbackState.value = previous
+                throw e
+            }
+        }
+    }
 
     fun wake() {
         if (demoMode.value) return
